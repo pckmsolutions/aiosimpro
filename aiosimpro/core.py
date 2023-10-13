@@ -1,11 +1,19 @@
+'''
+core simpro
+'''
+
 from aiohttp import ClientSession, hdrs
 from aiohttp.client_exceptions import ContentTypeError
 from functools import wraps
 from collections import namedtuple
 from typing import Dict, Any
 from itertools import count
+from logging import getLogger
 
+# hello
 Response = namedtuple('Response', 'headers json')
+
+logger = getLogger(__name__)
 
 def updating_method(func):
     @wraps(func)
@@ -14,6 +22,12 @@ def updating_method(func):
         return await func(*args, **kwargs)
 
     return wrapped
+
+class SimproAPIError(Exception):
+    def __init__(self, status_code, payload, headers):
+        self.status_code = status_code
+        self.payload = payload
+        self.headers = headers
 
 class Simpro:
     def __init__(self,
@@ -40,16 +54,18 @@ class Simpro:
             headers: Dict[str, str] = None,
             params: Dict[str, Any] = None,
             page_size: int = None,
+            item_limit: int = None,
             modified_since: str = None):
 
         params = dict(params or {})
         if page_size:
-            params['pageSize'] = page_size
+            params['pageSize'] = min(item_limit, page_size) if item_limit is not None else page_size
 
         headers = dict(headers or self._std_headers)
         if modified_since:
             headers['If-Modified-Since'] = modified_since
 
+        item_count = 0
         for page in count(1):
             params['page'] = page
             async with self.client_session.get(
@@ -60,11 +76,13 @@ class Simpro:
                 resp = await _respond(response)
                 num_pages = _get_possible_missing_int(resp.headers, 'Result-Pages')
 
-                for item in resp.json:
+                for item_count, item in zip(count(item_count + 1), resp.json):
                     yield item
+                    if item_limit is not None and item_count >= item_limit:
+                        return
 
-                if page >= num_pages:
-                    break
+            if page >= num_pages:
+                return
 
     @property
     def _std_headers(self):
@@ -87,7 +105,11 @@ async def _respond(response):
         logger.warning('API failed with respose code %d, text %s.',
                 response.status,
                 payload)
-        raise APIError()
+        raise SimproAPIError(
+                response.status,
+                payload,
+                response.headers
+                )
 
     try:
         return Response(response.headers, await response.json())
